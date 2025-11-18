@@ -3,7 +3,6 @@ import random
 import numpy as np
 import tkinter as tk
 
-
 LARGEUR = 800
 HAUTEUR = 600
 NB_LIEUX = 1000
@@ -67,7 +66,6 @@ class Graph:
 
     def plus_proche_voisin(self, nom_lieu, lieu_fait):
         self.distances[:, lieu_fait] = np.inf
-
         i = int(nom_lieu[1:])
         j = np.argmin(self.distances[i])
         return f"L{j}"
@@ -110,10 +108,8 @@ class Route:
         self.graph = classe_graph
 
         if ordre is None:
-            # Route issue de l’heuristique du plus proche voisin
             self.ordre = classe_graph.get_route_numerotee()
         else:
-            # Route fournie (par l'algorithme des fourmis par exemple)
             self.ordre = ordre
 
         self.distance = 0.0
@@ -153,7 +149,8 @@ class TSP_ACO:
         self.graph = graph
         self.n = len(self.graph.liste_lieux)
 
-        self.nb_fourmis = nb_fourmis
+        # Ajustement possible du nombre de fourmis si on veut scaler avec n
+        self.nb_fourmis = nb_fourmis if nb_fourmis is not None else min(50, max(5, self.n // 4))
         self.nb_iterations = nb_iterations
         self.alpha = alpha
         self.beta = beta
@@ -164,6 +161,21 @@ class TSP_ACO:
         valeur_initiale = 1.0
         self.pheromones = np.full((self.n, self.n), valeur_initiale, dtype=float)
         np.fill_diagonal(self.pheromones, 0.0)  # pas de phéromone sur les boucles i->i
+
+        # Matrice heuristique : 1 / distance (pré-calculée)
+        self.eta = np.zeros_like(self.graph.matrice_od, dtype=float)
+        with np.errstate(divide='ignore'):
+            self.eta = 1.0 / self.graph.matrice_od
+        # Supprimer les infinis (diagonale / distances infinies)
+        self.eta[np.isinf(self.eta)] = 0.0
+
+        # Pré-calcul des K plus proches voisins pour chaque ville
+        self.K = min(20, self.n - 1) if self.n > 1 else 0
+        self.voisins_proches = []
+        for i in range(self.n):
+            indices_trie = np.argsort(self.graph.matrice_od[i])
+            indices_trie = [j for j in indices_trie if j != i]
+            self.voisins_proches.append(indices_trie[:self.K])
 
         # Meilleure route globale (indices) et sa longueur
         self.meilleure_route_indices = None
@@ -189,32 +201,28 @@ class TSP_ACO:
     def choisir_ville_suivante(self, ville_actuelle, non_visitees):
         """
         Choisit la prochaine ville parmi les non_visitees en utilisant :
-        P(i->j) ~ (pheromones[i][j]^alpha) * (1/distance[i][j])^beta
+        P(i->j) ~ (pheromones[i][j]^alpha) * (eta[i][j]^beta)
         """
         if not non_visitees:
             return None
 
-        # On convertit l'ensemble en liste pour itérer
-        candidats = list(non_visitees)
+        # On commence par ne considérer que les K plus proches voisins
+        candidats = [j for j in self.voisins_proches[ville_actuelle] if j in non_visitees]
 
-        # On calcule les "attractivités" pour chaque candidat
+        # Si tous les voisins proches sont déjà visités, on retombe sur tous les non visités
+        if not candidats:
+            candidats = list(non_visitees)
+
         attractivites = []
         for j in candidats:
             tau = self.pheromones[ville_actuelle, j] ** self.alpha
-            dist = self.graph.matrice_od[ville_actuelle, j]
-            if dist > 0:
-                eta = (1.0 / dist) ** self.beta
-            else:
-                eta = 0.0  # cas théorique, normalement pas de distance nulle entre 2 lieux distincts
-
+            eta = (self.eta[ville_actuelle, j]) ** self.beta
             attractivites.append(tau * eta)
 
         somme = sum(attractivites)
         if somme == 0:
-            # Si toutes les attractivités sont nulles, on choisit au hasard
             return random.choice(candidats)
 
-        # On tire une ville au hasard selon la distribution de probabilité
         r = random.random()
         cumul = 0.0
         for j, attr in zip(candidats, attractivites):
@@ -223,7 +231,6 @@ class TSP_ACO:
             if r <= cumul:
                 return j
 
-        # Sécurité si les arrondis posent problème
         return candidats[-1]
 
     # ---------------------------------------------------
@@ -239,7 +246,6 @@ class TSP_ACO:
         depart = 0
         route = [depart]
 
-        # Ensemble des villes non visitées : 1..n-1
         non_visitees = set(range(1, self.n))
         ville_actuelle = depart
 
@@ -249,7 +255,6 @@ class TSP_ACO:
             non_visitees.remove(prochaine)
             ville_actuelle = prochaine
 
-        # Retour au point de départ
         route.append(depart)
         return route
 
@@ -276,7 +281,6 @@ class TSP_ACO:
                 toutes_routes.append(route_indices)
                 toutes_longueurs.append(longueur)
 
-                # Mise à jour de la meilleure route globale
                 if longueur < self.meilleure_distance:
                     self.meilleure_distance = longueur
                     self.meilleure_route_indices = route_indices
@@ -291,22 +295,16 @@ class TSP_ACO:
                     a = route_indices[i]
                     b = route_indices[i + 1]
                     self.pheromones[a, b] += depot
-                    self.pheromones[b, a] += depot  # graphe symétrique
+                    self.pheromones[b, a] += depot
 
             # 4) Meilleure route de l'itération (pour suivi)
             meilleur_iter = min(toutes_longueurs)
             index_best_iter = toutes_longueurs.index(meilleur_iter)
             meilleure_route_iter_indices = toutes_routes[index_best_iter]
 
-            print(
-                f"Itération {it}/{self.nb_iterations} - "
-                f"Meilleure distance (itération) : {meilleur_iter:.2f} - "
-                f"Meilleure distance globale : {self.meilleure_distance:.2f}"
-            )
 
             # 5) Mise à jour graphique si un affichage est fourni
             if affichage is not None:
-                # Conversion des indices en noms "L0", "L1", ...
                 ordre_noms_iter = [f"L{i}" for i in meilleure_route_iter_indices]
                 route_affichage = Route(self.graph, ordre=ordre_noms_iter)
                 route_affichage.distance_totale()
@@ -318,13 +316,11 @@ class TSP_ACO:
                     self.meilleure_distance
                 )
 
-        # À la fin : on construit un objet Route avec la meilleure route trouvée
         ordre_noms = [f"L{i}" for i in self.meilleure_route_indices]
         meilleure_route = Route(self.graph, ordre=ordre_noms)
         meilleure_route.distance_totale()
 
         return meilleure_route
-
 
 
 class Affichage:
@@ -339,71 +335,50 @@ class Affichage:
         self.graph = graph
         self.nom_groupe = nom_groupe
 
-        # Création de la fenêtre principale
         self.racine = tk.Tk()
         self.racine.title(f"TSP - Colonies de fourmis - {nom_groupe}")
 
-        # Canvas pour dessiner les lieux et les routes
         self.canvas = tk.Canvas(self.racine, width=LARGEUR, height=HAUTEUR, bg="white")
         self.canvas.pack()
 
-        # Zone de texte pour afficher les infos
         self.label_info = tk.Label(self.racine, text="", anchor="w", justify="left")
         self.label_info.pack(fill="x")
 
-        # Pour mémoriser les positions des lieux
-        # positions[i] = (x, y) pour le lieu d'indice i
         self.positions = []
-
-        # ID de la ligne représentant la route affichée
         self.id_route = None
-        # IDs des numéros d'ordre de visite
         self.id_ordre_textes = []
 
-        # Dessin initial des lieux
         self.dessiner_lieux()
 
-        # Raccourci clavier pour quitter
         self.racine.bind("<Escape>", self.quitter)
 
     def dessiner_lieux(self):
-        """Dessine tous les lieux sous forme de cercles avec leur numéro."""
         rayon = 5
         for i, lieu in enumerate(self.graph.liste_lieux):
             x = lieu.x
             y = lieu.y
             self.positions.append((x, y))
 
-            # Cercle
             self.canvas.create_oval(
                 x - rayon, y - rayon, x + rayon, y + rayon,
                 outline="black", fill="white"
             )
 
-            # Numéro du lieu (indice)
             self.canvas.create_text(x, y - 10, text=str(i), fill="black")
 
     def dessiner_route(self, route):
-        """
-        Dessine une route (objet Route) sous forme de ligne bleue pointillée,
-        et indique l'ordre de visite au-dessus de chaque lieu.
-        """
-        # Effacer l'ancienne route et les anciens numéros d'ordre
         if self.id_route is not None:
             self.canvas.delete(self.id_route)
         for tid in self.id_ordre_textes:
             self.canvas.delete(tid)
         self.id_ordre_textes = []
 
-        # Construire la liste de coordonnées (x1, y1, x2, y2, ..., xn, yn)
         coords = []
         for nom_lieu in route.ordre:
-            # nom_lieu = "L0", "L5", ...
-            index = int(nom_lieu[1:])    # on récupère l'indice après le 'L'
+            index = int(nom_lieu[1:])
             x, y = self.positions[index]
             coords.extend([x, y])
 
-        # Dessiner la ligne pointillée
         self.id_route = self.canvas.create_line(
             *coords,
             fill="blue",
@@ -411,8 +386,7 @@ class Affichage:
             width=2
         )
 
-        # Afficher l'ordre de visite au-dessus des lieux
-        for ordre, nom_lieu in enumerate(route.ordre[:-1]):  # on ignore le dernier "L0" de retour
+        for ordre, nom_lieu in enumerate(route.ordre[:-1]):
             index = int(nom_lieu[1:])
             x, y = self.positions[index]
             tid = self.canvas.create_text(
@@ -424,16 +398,8 @@ class Affichage:
             self.id_ordre_textes.append(tid)
 
     def mettre_a_jour(self, route, distance, iteration, meilleure_distance_globale):
-        """
-        Met à jour l'affichage :
-        - dessine la route
-        - met à jour le texte d'information
-        - force le rafraîchissement de la fenêtre
-        """
-        # Dessiner la route
         self.dessiner_route(route)
 
-        # Texte d'information
         texte = (
             f"Itération : {iteration}\n"
             f"Distance de la meilleure route (itération) : {distance:.2f}\n"
@@ -442,20 +408,17 @@ class Affichage:
         )
         self.label_info.config(text=texte)
 
-        # Rafraîchir la fenêtre Tkinter
         self.racine.update_idletasks()
         self.racine.update()
 
     def quitter(self, event=None):
-        """Ferme la fenêtre."""
         self.racine.destroy()
-
 
 
 if __name__ == "__main__":
     # 1) Création du graphe
     graph_test = Graph()
-    graph_test.generer_lieux_aleatoires(2000)  
+    graph_test.generer_lieux_aleatoires(2000)  # tu pourras jouer sur ce nombre
 
     # 2) Création de la fenêtre d'affichage
     affichage = Affichage(graph_test, nom_groupe="Groupe 2")
@@ -463,11 +426,11 @@ if __name__ == "__main__":
     # 3) Lancement de l'algorithme ACO
     aco = TSP_ACO(
         graph=graph_test,
-        nb_fourmis=20,
+        nb_fourmis=40,      # tu peux tester : min(50, n//4)
         nb_iterations=50,
         alpha=1.0,
-        beta=3.0,
-        evaporation=0.3,
+        beta=5.0,           
+        evaporation=0.4,
         Q=100.0
     )
 
@@ -477,9 +440,7 @@ if __name__ == "__main__":
     print(meilleure_route)
     print(f"Distance totale : {meilleure_route.distance:.2f}")
 
-    # 4) On laisse la fenêtre Tkinter ouverte
     try:
         affichage.racine.mainloop()
     except:
         pass
-
